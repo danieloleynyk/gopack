@@ -8,6 +8,8 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"path"
+	"regexp"
 )
 
 var downloadCmd = &cobra.Command{
@@ -30,26 +32,81 @@ func download(packages []string) {
 		utils.Catch(os.RemoveAll(tempPath),"An error occurred while removing temp directory",true)
 	}()
 
-	for _, packageName := range packages {
+	for _, packageRepoName := range packages {
+
+		// Generates package name
+		r := regexp.MustCompile(`.*/(.*)$`)
+		regexResult := r.FindStringSubmatch(packageRepoName)
+		packageName := regexResult[len(regexResult) - 1]
+
+		log.Printf("downloading %s\n", packageName)
+
 		// Downloads the package from a public repository
-		utils.RunCommand("/usr/bin/go", "get", "-d", "-v", packageName)
+		utils.RunCommand("/usr/bin/go", "get", "-d", "-v", packageRepoName)
 
-		reposList, err := getFileStructure(fmt.Sprintf("%s/pkg/mod", tempPath))
-		utils.Catch(err, "An error occurred while generating file structure", true)
+		// Creates a temp dir for the package artifacts
+		artifactsPath := path.Join(tempPath, packageName)
+		downloadedPackagePath := path.Join(tempPath, "pkg", "mod")
 
-		d, err := yaml.Marshal(&reposList)
-		if err != nil {
-			log.Fatalf("error: %v", err)
-		}
+		utils.Catch(
+			os.Mkdir(artifactsPath, 0755),
+			"An error occurred while creating artifacts dir",
+			true,
+		)
 
-		utils.Catch(ioutil.WriteFile("/tmp/dat1", d, 0644), "An error occurred while writing dependencies to file", true)
+		reposList, err := getFileStructure(downloadedPackagePath)
+		utils.Catch(
+			err,
+			"An error occurred while generating file structure",
+			true,
+		)
+
+		utils.Catch(
+			dumpRequirementsFile(reposList, artifactsPath),
+			"An error occurred while dumping requirements",
+			true,
+		)
+		log.Println("prepared requirements")
+
+		utils.Catch(
+			dumpPackages(downloadedPackagePath, artifactsPath),
+			"An error occurred while dumping packages",
+			true,
+		)
+		log.Println("prepared the package and its dependency")
+
+		utils.CompressTarball(artifactsPath)
+
+		fmt.Print("end")
 	}
 }
 
-func getFileStructure(rootPath string) ([]utils.Repository, error) {
-	var reposList []utils.Repository
+func dumpRequirementsFile(reposList []*utils.Repository, dumpPath string) error {
+	requirementsByteArray, err := yaml.Marshal(&reposList)
+	if err != nil {
+		return err
+	}
 
-	repos, err := getDirsAndFilesList(rootPath)
+	err = ioutil.WriteFile(
+		path.Join(dumpPath, utils.RequirementsFileName),
+		requirementsByteArray,
+		0644,
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func dumpPackages(downloadPackagesPath, artifactsPath string) error {
+	return utils.CopyDirectory(downloadPackagesPath, artifactsPath)
+}
+
+func getFileStructure(rootPath string) ([]*utils.Repository, error) {
+	var reposList []*utils.Repository
+
+	repos, err := utils.GetDirsAndFilesList(rootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -59,9 +116,9 @@ func getFileStructure(rootPath string) ([]utils.Repository, error) {
 			continue
 		}
 
-		var maintainersList []utils.Maintainer
+		var maintainersList []*utils.Maintainer
 
-		maintainers, err := getDirsAndFilesList(fmt.Sprintf("%s/%s", rootPath, repoName))
+		maintainers, err := utils.GetDirsAndFilesList(path.Join(rootPath, repoName))
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +126,7 @@ func getFileStructure(rootPath string) ([]utils.Repository, error) {
 		for _, maintainerName := range maintainers {
 			var packagesList []utils.Package
 
-			packages, err := getDirsAndFilesList(fmt.Sprintf("%s/%s/%s", rootPath, repoName, maintainerName))
+			packages, err := utils.GetDirsAndFilesList(path.Join(rootPath, repoName, maintainerName))
 			if err != nil {
 				return nil, err
 			}
@@ -78,32 +135,17 @@ func getFileStructure(rootPath string) ([]utils.Repository, error) {
 				packagesList = append(packagesList, utils.Package(packageName))
 			}
 
-			maintainersList = append(maintainersList, utils.Maintainer{
+			maintainersList = append(maintainersList, &utils.Maintainer{
 				Name: maintainerName,
 				Packages: packagesList,
 			})
 		}
 
-		reposList = append(reposList, utils.Repository{
+		reposList = append(reposList, &utils.Repository{
 			Name: repoName,
 			Maintainers: maintainersList,
 		})
 	}
 
 	return reposList, nil
-}
-
-func getDirsAndFilesList(rootPath string) ([]string, error) {
-	var filesList []string
-
-	files, err := ioutil.ReadDir(rootPath)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, file := range files {
-		filesList = append(filesList, file.Name())
-	}
-
-	return filesList, nil
 }

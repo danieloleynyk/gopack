@@ -9,5 +9,5 @@ type Maintainer struct {
 
 type Repository struct {
 	Name string `yaml:"repositoryName"`
-	Maintainers []Maintainer
+	Maintainers []*Maintainer
 }
